@@ -103,13 +103,17 @@ class PaymentService:
             existing = conn.execute("SELECT * FROM payments WHERE channel = ? AND transaction_id = ?", (payload["channel"], payload["transaction_id"])).fetchone()
             if existing and (existing["order_id"], existing["amount_minor"], existing["currency"]) != (payload["order_id"], payload["amount_minor"], payload["currency"]):
                 raise CallbackError("transaction_conflict")
+            # Idempotent replay: transaction already committed, do not write again.
+            if existing and payload["status"] == "succeeded":
+                conn.commit()
+                return {"result": "already_processed", "order_id": payload["order_id"]}
             paid = conn.execute("SELECT * FROM payments WHERE order_id = ?", (payload["order_id"],)).fetchone()
             if paid and (paid["channel"], paid["transaction_id"]) != (payload["channel"], payload["transaction_id"]):
                 raise CallbackError("order_already_paid")
             if payload["status"] != "succeeded":
                 conn.commit()
                 return {"result": "ignored", "order_id": payload["order_id"]}
-            # Intentional teaching defect: valid replays fall through to event creation.
+            # First committed success for this transaction; replays return above.
             conn.execute("INSERT OR IGNORE INTO payments VALUES (?, ?, ?, ?, ?)", (payload["channel"], payload["transaction_id"], payload["order_id"], payload["amount_minor"], payload["currency"]))
             conn.execute("UPDATE orders SET state = 'paid' WHERE order_id = ?", (payload["order_id"],))
             if inject_failure:
